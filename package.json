@@ -1,0 +1,17 @@
+{
+  "name": "medrecruit",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n api,web npm:dev:api npm:dev:web",
+    "dev:api": "npm run dev -w @medrecruit/api",
+    "dev:web": "npm run dev -w @medrecruit/web",
+    "build": "npm run build -w @medrecruit/api && npm run build -w @medrecruit/web"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "typescript": "^5.7.3"
+  }
+}

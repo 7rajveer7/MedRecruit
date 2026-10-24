@@ -1,0 +1,29 @@
+{
+  "name": "@medrecruit/api",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "node src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@fastify/cookie": "^11.0.2",
+    "@fastify/cors": "^10.0.2",
+    "@fastify/jwt": "^10.2.5",
+    "@fastify/multipart": "^9.0.3",
+    "bcryptjs": "^2.4.3",
+    "dotenv": "^16.4.7",
+    "fastify": "^5.2.1",
+    "mammoth": "^1.9.0",
+    "pdf-parse": "^1.1.1",
+    "sql.js": "^1.13.0"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/node": "^22.13.4",
+    "@types/sql.js": "^1.4.9",
+    "tsx": "^4.19.2"
+  },
+  "type": "module"
+}
