@@ -49,6 +49,22 @@ db.exec(`
     onboarding_completed INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS doctor_accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    specialty TEXT NOT NULL DEFAULT '',
+    location TEXT NOT NULL DEFAULT '',
+    license_states TEXT NOT NULL DEFAULT '[]',
+    availability TEXT NOT NULL DEFAULT '',
+    experience_years INTEGER NOT NULL DEFAULT 0,
+    resume_filename TEXT,
+    resume_storage_key TEXT,
+    resume_text TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
   CREATE TABLE IF NOT EXISTS jobs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -74,6 +90,7 @@ db.exec(`
     resume_filename TEXT,
     resume_storage_key TEXT,
     resume_text TEXT NOT NULL DEFAULT '',
+    doctor_id INTEGER,
     stage TEXT NOT NULL DEFAULT 'New',
     created_at TEXT NOT NULL
   );
@@ -100,7 +117,21 @@ db.exec(`
     calendar_event_url TEXT,
     created_at TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS applications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    doctor_id INTEGER NOT NULL REFERENCES doctor_accounts(id) ON DELETE CASCADE,
+    job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    candidate_id INTEGER NOT NULL UNIQUE REFERENCES candidates(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'Applied',
+    applied_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(doctor_id, job_id)
+  );
 `);
+
+// Older local databases predate the doctor portal. Keep them usable without deleting recruiter data.
+const candidateColumns = rows<{ name: string }>("PRAGMA table_info(candidates)").map((column) => column.name);
+if (!candidateColumns.includes("doctor_id")) db.run("ALTER TABLE candidates ADD COLUMN doctor_id INTEGER");
 
 function persist() {
   writeFileSync(databasePath, Buffer.from(db.export()));
@@ -136,15 +167,30 @@ function cleanUser(user: Record<string, unknown>) {
   const { password_hash: _password, ...safe } = user;
   return { ...safe, onboardingCompleted: Boolean(safe.onboarding_completed) };
 }
+function authPayload(request: FastifyRequest) {
+  return request.user as { sub?: number; accountType?: string };
+}
 function userId(request: FastifyRequest) {
-  const payload = request.user as { sub?: number };
+  const payload = authPayload(request);
   return Number(payload.sub);
+}
+function doctorId(request: FastifyRequest) {
+  return Number(authPayload(request).sub);
 }
 async function requireAuth(request: FastifyRequest, reply: FastifyReply) {
   try {
     await request.jwtVerify();
+    if (authPayload(request).accountType === "doctor") return reply.code(403).send({ error: "Recruiter access is required." });
   } catch {
     return reply.code(401).send({ error: "Sign in to continue." });
+  }
+}
+async function requireDoctor(request: FastifyRequest, reply: FastifyReply) {
+  try {
+    await request.jwtVerify();
+    if (authPayload(request).accountType !== "doctor") return reply.code(403).send({ error: "Doctor access is required." });
+  } catch {
+    return reply.code(401).send({ error: "Sign in as a doctor to continue." });
   }
 }
 function cookieOptions() {
@@ -153,6 +199,14 @@ function cookieOptions() {
 function session(reply: FastifyReply, user: Record<string, unknown>) {
   const token = app.jwt.sign({ sub: Number(user.id) });
   reply.setCookie("medrecruit_session", token, cookieOptions());
+}
+function doctorSession(reply: FastifyReply, doctor: Record<string, unknown>) {
+  const token = app.jwt.sign({ sub: Number(doctor.id), accountType: "doctor" });
+  reply.setCookie("medrecruit_session", token, cookieOptions());
+}
+function cleanDoctor(doctor: Record<string, unknown>) {
+  const { password_hash: _password, resume_text: _resumeText, resume_storage_key: _storage, ...safe } = doctor;
+  return { ...safe, licenseStates: JSON.parse(String(safe.license_states ?? "[]")), hasResume: Boolean(safe.resume_filename) };
 }
 function normalize(value: unknown) {
   return typeof value === "string" ? value.trim() : "";
@@ -182,6 +236,110 @@ app.get("/", async () => ({
 }));
 app.get("/health", async () => ({ status: "ok", service: "medrecruit-local-api", storage: "sqlite-wasm" }));
 
+function publicJob(job: Record<string, unknown>) {
+  return { id: Number(job.id), title: String(job.title), specialty: String(job.specialty), location: String(job.location), description: String(job.description ?? ""), requiredLicenses: JSON.parse(String(job.required_licenses ?? "[]")) as string[], companyName: String(job.company_name || "Healthcare team"), status: String(job.status) };
+}
+
+app.get("/api/public/jobs", async () => {
+  const openJobs = rows<Record<string, unknown>>("SELECT jobs.*, users.company_name FROM jobs JOIN users ON users.id = jobs.user_id WHERE jobs.status = 'Open' ORDER BY jobs.created_at DESC");
+  return openJobs.map(publicJob);
+});
+
+app.post<{ Body: { name?: string; email?: string; password?: string } }>("/api/doctor/auth/signup", async (request, reply) => {
+  const name = normalize(request.body?.name);
+  const email = normalize(request.body?.email).toLowerCase();
+  const password = request.body?.password ?? "";
+  if (name.length < 2 || !/^\S+@\S+\.\S+$/.test(email) || password.length < 10) return reply.code(400).send({ error: "Provide a name, valid email, and password with at least 10 characters." });
+  if (one("SELECT id FROM users WHERE email = ? UNION SELECT id FROM doctor_accounts WHERE email = ?", [email, email])) return reply.code(409).send({ error: "An account already exists for this email." });
+  const now = new Date().toISOString();
+  run("INSERT INTO doctor_accounts (name, email, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?, ?)", [name, email, await bcrypt.hash(password, 12), now, now]);
+  const id = newId();
+  persist();
+  const doctor = one<Record<string, unknown>>("SELECT * FROM doctor_accounts WHERE id = ?", [id])!;
+  doctorSession(reply, doctor);
+  return reply.code(201).send({ doctor: cleanDoctor(doctor) });
+});
+
+app.post<{ Body: { email?: string; password?: string } }>("/api/doctor/auth/login", async (request, reply) => {
+  const email = normalize(request.body?.email).toLowerCase();
+  const doctor = one<Record<string, unknown>>("SELECT * FROM doctor_accounts WHERE email = ?", [email]);
+  if (!doctor || !(await bcrypt.compare(request.body?.password ?? "", String(doctor.password_hash)))) return reply.code(401).send({ error: "Email or password is incorrect." });
+  doctorSession(reply, doctor);
+  return { doctor: cleanDoctor(doctor) };
+});
+
+app.get("/api/doctor/auth/me", { preHandler: requireDoctor }, async (request, reply) => {
+  const doctor = one<Record<string, unknown>>("SELECT * FROM doctor_accounts WHERE id = ?", [doctorId(request)]);
+  if (!doctor) return reply.code(404).send({ error: "Doctor account not found." });
+  return { doctor: cleanDoctor(doctor) };
+});
+
+app.get("/api/doctor/profile", { preHandler: requireDoctor }, async (request, reply) => {
+  const doctor = one<Record<string, unknown>>("SELECT * FROM doctor_accounts WHERE id = ?", [doctorId(request)]);
+  if (!doctor) return reply.code(404).send({ error: "Doctor account not found." });
+  return { doctor: cleanDoctor(doctor) };
+});
+
+app.patch<{ Body: { specialty?: string; location?: string; licenseStates?: unknown; availability?: string; experienceYears?: number } }>("/api/doctor/profile", { preHandler: requireDoctor }, async (request, reply) => {
+  const experience = Math.max(0, Math.min(60, Number(request.body?.experienceYears) || 0));
+  run("UPDATE doctor_accounts SET specialty = ?, location = ?, license_states = ?, availability = ?, experience_years = ?, updated_at = ? WHERE id = ?", [normalize(request.body?.specialty), normalize(request.body?.location), JSON.stringify(jsonArray(request.body?.licenseStates)), normalize(request.body?.availability), experience, new Date().toISOString(), doctorId(request)]);
+  persist();
+  const doctor = one<Record<string, unknown>>("SELECT * FROM doctor_accounts WHERE id = ?", [doctorId(request)]);
+  if (!doctor) return reply.code(404).send({ error: "Doctor account not found." });
+  return { doctor: cleanDoctor(doctor) };
+});
+
+app.post("/api/doctor/profile/resume", { preHandler: requireDoctor }, async (request, reply) => {
+  const upload = await request.file();
+  if (!upload) return reply.code(400).send({ error: "Attach a PDF, DOCX, or TXT resume." });
+  const extension = extname(upload.filename).toLowerCase();
+  if (![".pdf", ".docx", ".txt"].includes(extension)) return reply.code(400).send({ error: "Only PDF, DOCX, and TXT resumes are supported." });
+  const buffer = await upload.toBuffer();
+  let text = "";
+  try {
+    if (extension === ".pdf") text = (await pdfParse(buffer)).text;
+    else if (extension === ".docx") text = (await mammoth.extractRawText({ buffer })).value;
+    else text = buffer.toString("utf8");
+  } catch {
+    return reply.code(422).send({ error: "Could not read this resume file. Try a text-based PDF, DOCX, or TXT." });
+  }
+  const storageKey = `${randomUUID()}${extension}`;
+  writeFileSync(join(uploadDir, storageKey), buffer, { flag: "wx" });
+  run("UPDATE doctor_accounts SET resume_filename = ?, resume_storage_key = ?, resume_text = ?, updated_at = ? WHERE id = ?", [upload.filename.replace(/[\\/]/g, "_").slice(0, 180), storageKey, text.slice(0, 150_000), new Date().toISOString(), doctorId(request)]);
+  persist();
+  const doctor = one<Record<string, unknown>>("SELECT * FROM doctor_accounts WHERE id = ?", [doctorId(request)]);
+  if (!doctor) return reply.code(404).send({ error: "Doctor account not found." });
+  return { doctor: cleanDoctor(doctor) };
+});
+
+app.post<{ Params: { id: string } }>("/api/public/jobs/:id/applications", { preHandler: requireDoctor }, async (request, reply) => {
+  const doctor = one<Record<string, unknown>>("SELECT * FROM doctor_accounts WHERE id = ?", [doctorId(request)]);
+  if (!doctor) return reply.code(404).send({ error: "Doctor account not found." });
+  if (!doctor.resume_storage_key || !normalize(doctor.specialty)) return reply.code(400).send({ error: "Complete your profile and upload a resume before applying." });
+  const job = one<Record<string, unknown>>("SELECT * FROM jobs WHERE id = ? AND status = 'Open'", [Number(request.params.id)]);
+  if (!job) return reply.code(404).send({ error: "This role is no longer open." });
+  if (one("SELECT id FROM applications WHERE doctor_id = ? AND job_id = ?", [doctorId(request), Number(job.id)])) return reply.code(409).send({ error: "You have already applied to this role." });
+  const now = new Date().toISOString();
+  run("INSERT INTO candidates (user_id, name, email, specialty, location, license_states, availability, experience_years, source, resume_filename, resume_storage_key, resume_text, doctor_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [Number(job.user_id), String(doctor.name), String(doctor.email), String(doctor.specialty), String(doctor.location), String(doctor.license_states), String(doctor.availability), Number(doctor.experience_years), "Doctor portal application", String(doctor.resume_filename), String(doctor.resume_storage_key), String(doctor.resume_text ?? ""), doctorId(request), now]);
+  const candidateId = newId();
+  run("INSERT INTO applications (doctor_id, job_id, candidate_id, status, applied_at, updated_at) VALUES (?, ?, ?, 'Applied', ?, ?)", [doctorId(request), Number(job.id), candidateId, now, now]);
+  const applicationId = newId();
+  persist();
+  return reply.code(201).send({ application: { id: applicationId, job: publicJob({ ...job, company_name: one<{ company_name: string }>("SELECT company_name FROM users WHERE id = ?", [Number(job.user_id)])?.company_name }), status: "Applied", appliedAt: now } });
+});
+
+app.get("/api/doctor/applications", { preHandler: requireDoctor }, async (request) => {
+  const applications = rows<Record<string, unknown>>("SELECT applications.id, applications.status, applications.applied_at, applications.updated_at, applications.candidate_id, jobs.id AS job_id, jobs.title, jobs.specialty, jobs.location, jobs.status AS job_status, users.company_name FROM applications JOIN jobs ON jobs.id = applications.job_id JOIN users ON users.id = jobs.user_id WHERE applications.doctor_id = ? ORDER BY applications.applied_at DESC", [doctorId(request)]);
+  return applications.map((application) => ({
+    id: Number(application.id),
+    status: application.job_status === "Closed" ? "Expired" : String(application.status),
+    appliedAt: String(application.applied_at),
+    updatedAt: String(application.updated_at),
+    job: { id: Number(application.job_id), title: String(application.title), specialty: String(application.specialty), location: String(application.location), companyName: String(application.company_name || "Healthcare team"), status: String(application.job_status) },
+    meetings: rows<Record<string, unknown>>("SELECT id, title, starts_at, meet_url, calendar_event_url, calendar_event_id FROM meetings WHERE candidate_id = ? ORDER BY starts_at DESC", [Number(application.candidate_id)]).map((meeting) => ({ id: Number(meeting.id), title: String(meeting.title), startsAt: String(meeting.starts_at), meetUrl: String(meeting.meet_url), calendarEventUrl: meeting.calendar_event_url ? String(meeting.calendar_event_url) : null, scheduled: Boolean(meeting.calendar_event_id), meetReady: !String(meeting.meet_url).endsWith("/new") }))
+  }));
+});
+
 app.post<{ Body: { name?: string; email?: string; password?: string } }>("/api/auth/signup", async (request, reply) => {
   const name = normalize(request.body?.name);
   const email = normalize(request.body?.email).toLowerCase();
@@ -189,7 +347,7 @@ app.post<{ Body: { name?: string; email?: string; password?: string } }>("/api/a
   if (name.length < 2 || !/^\S+@\S+\.\S+$/.test(email) || password.length < 10) {
     return reply.code(400).send({ error: "Provide a name, valid email, and password with at least 10 characters." });
   }
-  if (one("SELECT id FROM users WHERE email = ?", [email])) return reply.code(409).send({ error: "An account already exists for this email." });
+  if (one("SELECT id FROM users WHERE email = ? UNION SELECT id FROM doctor_accounts WHERE email = ?", [email, email])) return reply.code(409).send({ error: "An account already exists for this email." });
   run("INSERT INTO users (name, email, password_hash, created_at) VALUES (?, ?, ?, ?)", [name, email, await bcrypt.hash(password, 12), new Date().toISOString()]);
   const id = newId();
   persist();
@@ -245,8 +403,23 @@ app.post<{ Body: { title?: string; specialty?: string; location?: string; descri
   return reply.code(201).send({ ...job, requiredLicenses: JSON.parse(String(job.required_licenses)) });
 });
 
+app.patch<{ Params: { id: string }; Body: { status?: string } }>("/api/jobs/:id/status", { preHandler: requireAuth }, async (request, reply) => {
+  const status = normalize(request.body?.status);
+  if (!["Open", "Closed"].includes(status)) return reply.code(400).send({ error: "Choose Open or Closed." });
+  const job = jobFor(userId(request), Number(request.params.id));
+  if (!job) return reply.code(404).send({ error: "Role not found." });
+  run("UPDATE jobs SET status = ? WHERE id = ? AND user_id = ?", [status, Number(job.id), userId(request)]);
+  if (status === "Closed") {
+    const now = new Date().toISOString();
+    run("UPDATE applications SET status = 'Expired', updated_at = ? WHERE job_id = ?", [now, Number(job.id)]);
+    run("UPDATE candidates SET stage = 'Expired' WHERE id IN (SELECT candidate_id FROM applications WHERE job_id = ?)", [Number(job.id)]);
+  }
+  persist();
+  return { job: { ...job, status } };
+});
+
 app.get("/api/candidates", { preHandler: requireAuth }, async (request) => {
-  const candidates = rows<Record<string, unknown>>("SELECT * FROM candidates WHERE user_id = ? ORDER BY created_at DESC", [userId(request)]);
+  const candidates = rows<Record<string, unknown>>("SELECT candidates.*, jobs.title AS application_job_title FROM candidates LEFT JOIN applications ON applications.candidate_id = candidates.id LEFT JOIN jobs ON jobs.id = applications.job_id WHERE candidates.user_id = ? ORDER BY candidates.created_at DESC", [userId(request)]);
   return candidates.map(safeCandidate);
 });
 
@@ -261,12 +434,19 @@ app.post<{ Body: { name?: string; email?: string; specialty?: string; location?:
 });
 
 app.patch<{ Params: { id: string }; Body: { stage?: string } }>("/api/candidates/:id/stage", { preHandler: requireAuth }, async (request, reply) => {
-  const stages = ["New", "Contacted", "Interested", "Screening", "Submitted", "Interview", "Offer", "Placed", "Archived"];
+  const stages = ["New", "Contacted", "Interested", "Screening", "Submitted", "Interview", "Offer", "Placed", "Rejected", "Expired", "Archived"];
   const stage = normalize(request.body?.stage);
   if (!stages.includes(stage)) return reply.code(400).send({ error: "Choose a supported ATS stage." });
   const candidate = candidateFor(userId(request), Number(request.params.id));
   if (!candidate) return reply.code(404).send({ error: "Candidate not found." });
   run("UPDATE candidates SET stage = ? WHERE id = ? AND user_id = ?", [stage, Number(candidate.id), userId(request)]);
+  const applicationStatus = stage === "New" ? "Applied"
+    : stage === "Interview" || stage === "Screening" ? "Interview"
+    : stage === "Offer" || stage === "Placed" ? "Offer"
+    : stage === "Rejected" ? "Rejected"
+    : stage === "Expired" || stage === "Archived" ? "Expired"
+    : "Under consideration";
+  run("UPDATE applications SET status = ?, updated_at = ? WHERE candidate_id = ?", [applicationStatus, new Date().toISOString(), Number(candidate.id)]);
   persist();
   return { candidate: safeCandidate(candidateFor(userId(request), Number(candidate.id))!) };
 });
@@ -311,7 +491,7 @@ app.post<{ Params: { id: string } }>("/api/jobs/:id/shortlist", { preHandler: re
   const job = jobFor(user, Number(request.params.id));
   if (!job) return reply.code(404).send({ error: "Job not found." });
   const required = JSON.parse(String(job.required_licenses)) as string[];
-  const candidates = rows<Record<string, unknown>>("SELECT * FROM candidates WHERE user_id = ?", [user]);
+  const candidates = rows<Record<string, unknown>>("SELECT * FROM candidates WHERE user_id = ? AND (doctor_id IS NULL OR id IN (SELECT candidate_id FROM applications WHERE job_id = ?))", [user, Number(job.id)]);
   const results = candidates.map((candidate) => {
     const licenses = JSON.parse(String(candidate.license_states)) as string[];
     const reasons: string[] = [];
@@ -445,6 +625,7 @@ app.post<{ Params: { id: string }; Body: { startsAt?: string; durationMinutes?: 
   }
   run("INSERT INTO meetings (user_id, candidate_id, title, starts_at, meet_url, calendar_event_id, calendar_event_url, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", [user, Number(candidate.id), title, startsAt.toISOString(), meetUrl, calendarEventId, calendarEventUrl, new Date().toISOString()]);
   const meetingId = newId();
+  run("UPDATE applications SET status = 'Interview', updated_at = ? WHERE candidate_id = ?", [new Date().toISOString(), Number(candidate.id)]);
   persist();
   const meetReady = !meetUrl.endsWith("/new");
   const note = scheduled

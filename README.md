@@ -1,15 +1,15 @@
-# MedRecruit — local ATS MVP
+# MedRecruit — local physician recruiting platform
 
-A deliberately small physician recruiting workspace. The focus is an evidence-first ATS: signup and recruiter onboarding, role setup, resume intake, explainable shortlists, AI-assisted drafts, and candidate screening meetings.
+MedRecruit is a local-first recruiting prototype for physician roles. It includes a recruiter ATS and a doctor portal so applicants can create an account, upload a resume, apply to open roles, and track application and meeting updates.
 
 ## Local stack
 
-- **Frontend:** Next.js (`apps/web`)
+- **Frontend:** Next.js + React (`apps/web`)
 - **Backend:** Fastify + TypeScript (`apps/api`)
-- **Database:** SQLite via WebAssembly (`sql.js`), persisted locally at `data/medrecruit.sqlite`; no database server or native build tools required
-- **Resume storage:** private local files in `storage/resumes`; only authenticated API routes can download them
-- **AI:** optional OpenAI API key, used only for factual resume summaries and draft screening questions. Without a key, deterministic local fallback text is returned. AI does not rank candidates or verify licenses.
-- **Meetings:** optional Google Calendar OAuth integration creates a calendar event with a unique Google Meet conference. Without OAuth configuration, the API returns a quick-join link but does not schedule an event.
+- **Database:** SQLite via WebAssembly (`sql.js`), persisted at `data/medrecruit.sqlite`
+- **Resume storage:** local files in `storage/resumes`; recruiter and doctor APIs authorize access to their own records
+- **AI:** optional OpenAI API key for factual resume summaries and screening question drafts. AI does not rank candidates or verify licenses.
+- **Meetings:** optional Google Calendar OAuth creates a Calendar event and requests a Google Meet conference. Google Calendar sends the attendee invitation when configured. Without OAuth, the recruiter can save an unscheduled screen request; the doctor dashboard shows it without pretending a Meet room was created.
 
 ## Get running locally
 
@@ -22,32 +22,43 @@ npm install
 npm run dev
 ```
 
-The interactive ATS runs at [http://localhost:3000](http://localhost:3000); the local API runs at [http://localhost:4000](http://localhost:4000). The Next.js dev server uses Webpack polling for compatibility with this machine’s file watcher limits. API health: `GET /health`. The API binds to `127.0.0.1` and allows browser requests from `WEB_ORIGIN`.
+- Recruiter ATS: [http://localhost:3000](http://localhost:3000)
+- Doctor portal: [http://localhost:3000/doctor](http://localhost:3000/doctor)
+- Local API: [http://localhost:4000](http://localhost:4000)
+- Health check: `GET /health`
 
-A local `.env` with a generated development JWT secret is already present on this machine. It is ignored by Git. Replace values there; never commit `.env`. The checked-in `.env.example` documents optional integration settings. The OpenAI and Google credentials are blank until you add your own.
+The web and API run as separate local processes. The API binds to `127.0.0.1` and accepts browser requests from `WEB_ORIGIN`. `.env` is ignored by Git. Never commit real credentials; `.env.example` documents the expected variables.
 
-## Lean product scope
+## Doctor application workflow
 
-1. **Signup and onboarding:** create a local recruiter account; choose an organization name and role (recruiter, sourcing lead, staffing manager, or hiring manager).
-2. **Role intake:** create and list roles with specialty, location, requirements, and required license states.
-3. **Candidate ATS:** create candidate records, upload PDF/DOCX/TXT resumes, extract text locally, track source, availability, license states, experience, and stage. Resume files remain private on disk.
-4. **Innovative shortlist:** calculate a transparent 0–100 match score and show evidence and missing information. Specialty and required licenses are eligibility gates; every result retains a recruiter verification checklist.
-5. **AI assistance:** draft a factual resume summary and role-specific screening questions. The local fallback works without an API key. AI does not independently verify credentials or make hiring decisions.
-6. **Screening meeting:** create a scheduled Calendar event and unique Meet conference when Google OAuth is configured; otherwise return the Google Meet quick-join page and clearly mark it unscheduled.
+1. A recruiter signs in to the ATS and creates a role. Open roles appear on the public doctor portal.
+2. A doctor visits `/doctor`, creates a doctor account, and completes their profile with specialty, location, license states, availability, experience, and a PDF/DOCX/TXT resume.
+3. The doctor applies to an open role. MedRecruit creates an application and a recruiter-owned candidate record linked to that role.
+4. The recruiter reviews the person under **Candidates** and changes their ATS stage. The doctor dashboard reflects statuses such as **Applied**, **Under consideration**, **Interview**, **Offer**, **Rejected**, and **Expired**.
+5. A doctor’s dashboard refreshes application and meeting information every 20 seconds while open. Closing a role expires its applications. When Google Calendar is configured and a recruiter schedules the screen, the doctor receives the Calendar invitation and can see the meeting in the dashboard.
+
+## Recruiter ATS features
+
+1. **Signup and onboarding:** create a recruiter account, workspace name, and recruiting role.
+2. **Role intake:** create, close, and reopen roles with specialty, location, notes, and required license states.
+3. **Candidate ATS:** manually add candidates or receive doctor portal applications; upload PDF/DOCX/TXT resumes, track source, availability, license states, experience, and pipeline stage.
+4. **Evidence shortlist:** calculate a transparent 0–100 role-fit signal with reasons and follow-up gaps. Specialty and configured license-state requirements gate eligibility.
+5. **AI assistance:** draft factual resume summaries and role-specific screening questions. Local fallback text works without an API key.
+6. **Screen meetings:** save a recruiter screen with a candidate; optional Google credentials schedule a Calendar invite and request a unique Meet conference.
 
 ## API routes
 
-- `GET /` — local API welcome page with links to key endpoints
-- `GET /health` — API health status
-- `POST /api/auth/signup`, `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me`
-- `POST /api/onboarding`
-- `GET/POST /api/jobs`; `POST /api/jobs/:id/shortlist`
-- `GET/POST /api/candidates`; `PATCH /api/candidates/:id/stage`; `POST /api/candidates/:id/resume`; `GET /api/candidates/:id/resume`
-- `POST /api/assist/resume-summary`, `POST /api/assist/screening-questions`
-- `POST /api/candidates/:id/meetings`, `GET /api/meetings`
+- `GET /`, `GET /health`
+- Recruiter: `POST /api/auth/signup`, `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me`, `POST /api/onboarding`
+- Roles: `GET/POST /api/jobs`, `PATCH /api/jobs/:id/status`, `POST /api/jobs/:id/shortlist`
+- Candidates: `GET/POST /api/candidates`, `PATCH /api/candidates/:id/stage`, `POST/GET /api/candidates/:id/resume`
+- Doctors: `POST /api/doctor/auth/signup`, `POST /api/doctor/auth/login`, `GET /api/doctor/auth/me`, `GET/PATCH /api/doctor/profile`, `POST /api/doctor/profile/resume`, `GET /api/doctor/applications`
+- Public roles/applications: `GET /api/public/jobs`, `POST /api/public/jobs/:id/applications`
+- AI: `POST /api/assist/resume-summary`, `POST /api/assist/screening-questions`
+- Meetings: `POST /api/candidates/:id/meetings`, `GET /api/meetings`
 
-All ATS and meeting routes require the HTTP-only local session cookie. The MVP is single-user/local-development software and is not ready for real candidate data or production deployment. Before a pilot, add organization-level isolation, backups, audit history, rate limiting, malware scanning for uploaded files, credential verification workflows, and a specialist review of privacy and applicable legal obligations.
+## Matching logic and boundaries
 
-## Current matching logic
+The current match signal uses specialty (35), license-state evidence (25), location (15), recorded availability (10), resume keyword evidence (5), and experience (up to 10). Specialty and required license-state matches are eligibility gates. License states are entered by a user and are **not verified by a licensing board**. Scores are recruiter prioritization aids, not hiring decisions or clinical assessments.
 
-Specialty 35, license evidence 25, location 15, recorded availability 10, resume evidence 5, and experience up to 10. The score is a recruiter prioritization aid, not a clinical or employment decision. Missing or unverified credential evidence is displayed instead of being guessed.
+This is a local prototype, not ready for real candidate data or production deployment. It has no external ATS connector, email service, automated test suite, organization-level isolation, backup/recovery process, audit history, rate limiting, or malware scanning. Before a customer pilot, add tenant-scoped authorization, database migrations and managed persistence, secure resume storage and retention, auditability, integration reliability, credential verification workflows, and specialist privacy/legal review.

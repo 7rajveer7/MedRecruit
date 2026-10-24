@@ -8,13 +8,13 @@ This guide explains the project as it exists in this repository and helps you di
 
 MedRecruit is a local physician-recruiting ATS prototype. A recruiter can:
 
-1. Create an account and set up a workspace and recruiter role.
-2. Add an open role with specialty, location, notes, and required license states.
-3. Add candidates and upload PDF, DOCX, or TXT resumes.
-4. Move candidates through recruiting pipeline stages.
-5. Build a shortlist with a visible score, reasons, and information gaps.
-6. Draft a factual resume summary or role-specific screening questions, using an optional LLM.
-7. Save a screen meeting and, when Google Calendar OAuth is configured, create a Calendar event requesting a Meet conference.
+1. Recruiters create an account and set up a workspace; doctors have a separate signup and profile.
+2. Recruiters add open roles with specialty, location, notes, and required license states; doctors can browse them in the public portal.
+3. Doctors upload a resume to their profile and apply to roles; each application creates a recruiter-owned candidate record linked to that role. Recruiters can also add candidates manually.
+4. Recruiters move applicants through recruiting stages; doctor dashboards reflect statuses such as Applied, Under consideration, Interview, Offer, Rejected, and Expired. Closing a role expires its applications.
+5. Recruiters build a shortlist with a visible score, reasons, and information gaps.
+6. Recruiters can draft a factual resume summary or role-specific screening questions, using an optional LLM.
+7. Recruiters can save a screen meeting. The doctor dashboard refreshes application and meeting information every 20 seconds; configured Google Calendar events invite the doctor by email.
 
 The distinguishing product choice is **evidence-first matching**. The system shows why a profile matched and what is missing. The score is a prioritization aid; it is not proof of licensure, clinical competence, or candidate quality.
 
@@ -42,7 +42,9 @@ It is a **monorepo** because the frontend and backend live in one Git repository
 | [`apps/api/src/index.ts`](../apps/api/src/index.ts) | Main backend entry point: environment setup, database schema/helpers, auth, REST routes, shortlist algorithm, AI and Google integrations, server startup. | Read top to bottom once; then find `app.post(...)`/`app.get(...)` for each route. It is currently one large file, not a layered service architecture. |
 | [`apps/api/src/pdf-parse.d.ts`](../apps/api/src/pdf-parse.d.ts) | Small TypeScript declaration for the PDF parser package’s return type. | A type declaration tells TypeScript how to understand a library. It does not implement PDF parsing. |
 | [`apps/api/tsconfig.json`](../apps/api/tsconfig.json) | API TypeScript compiler settings. Strict checking is enabled and build output goes to `dist`. | `strict` catches many accidental type mistakes before runtime. |
-| [`apps/web/app/page.tsx`](../apps/web/app/page.tsx) | The client-side React application: login/signup, onboarding, roles, candidates, shortlist, AI drafts, and meetings. It calls the API and holds screen state. | It is a “client component” (`"use client"`) because it uses React state, event handlers, and browser APIs. It currently contains most screens in one file. |
+| [`apps/web/app/page.tsx`](../apps/web/app/page.tsx) | Recruiter client application: login/signup, onboarding, roles, candidates, shortlist, AI drafts, and meetings. | It is a “client component” (`"use client"`) because it uses React state, event handlers, and browser APIs. It currently contains most recruiter screens in one file. |
+| [`apps/web/app/doctor/page.tsx`](../apps/web/app/doctor/page.tsx) | Doctor portal: separate signup/login, public open roles, profile/resume upload, apply action, application status dashboard, and meeting details. | The `/doctor` route is created by placing `doctor/page.tsx` inside Next.js `app/doctor`. It polls application updates while open. |
+| [`apps/web/app/doctor/doctor.css`](../apps/web/app/doctor/doctor.css) | Responsive visual styles for the doctor portal. | It separates the applicant-facing visual system from the recruiter UI styles.
 | [`apps/web/app/globals.css`](../apps/web/app/globals.css) | Global styles and responsive layouts for the UI. | CSS controls presentation; it does not perform business rules or data persistence. |
 | [`apps/web/app/layout.tsx`](../apps/web/app/layout.tsx) | Next.js root layout, metadata, and global stylesheet import. | This wraps the page and sets the browser tab title/description. |
 | [`apps/web/tsconfig.json`](../apps/web/tsconfig.json) | Frontend TypeScript and Next.js compiler settings. | `moduleResolution: bundler` is configured for frontend imports. |
@@ -116,8 +118,8 @@ Current score inputs are specialty (35 points), license evidence (25), location 
 | Area from the job description | In this project today | Credible next engineering step |
 |---|---|---|
 | Jobs/candidates/assignments/agent runs | Jobs and candidates exist; there is no assignment model or durable agent-run model. | Define assignment ownership/status and an `agent_runs` record with input references, status, output, model/prompt version, timestamps, and error details. |
-| ATS integrations | No external ATS connector, sync, webhook, or polling exists. | Build one narrow connector behind an adapter interface; support OAuth, pagination, rate limits, cursor sync, idempotent upsert, retry/backoff, webhook verification, and reconciliation. Start read-only and prove mapping quality before writing back. |
-| Recruiter views | Local UI includes roles, candidates, stage selection, shortlist, and meetings. | Add saved filters, bulk actions with safeguards, candidate detail/history, assignment ownership, and accessible keyboard-friendly workflows. |
+| ATS integrations | No external ATS connector, sync, webhook, or polling exists. The local doctor portal does create a candidate and application in MedRecruit’s own database. | Build one narrow connector behind an adapter interface; support OAuth, pagination, rate limits, cursor sync, idempotent upsert, retry/backoff, webhook verification, and reconciliation. Start read-only and prove mapping quality before writing back. |
+| Recruiter and doctor views | Local UI includes recruiter roles/candidates/shortlist/meetings and doctor applications/profile/status/meeting views. Doctor status refresh uses 20-second polling. | Add saved filters, bulk actions with safeguards, candidate detail/history, assignment ownership, and accessible keyboard-friendly workflows. |
 | Structured AI screening | Draft questions and factual summaries only. The app does not conduct an automated interview or score a voice/video screen. | Start with recruiter-approved question templates and structured note extraction; retain source quotes, schema validation, and reviewer edits. Do not auto-reject candidates. |
 | Agent platform | No autonomous agent loop or tool execution framework. | Model an explicit workflow with approved tools, scoped permissions, timeouts, retry policy, run logs, and a human approval point. Keep early versions narrow and observable. |
 | Instrumentation | Fastify request logs only. | Add request/run correlation IDs, structured domain events, latency/error metrics, dashboards, and alerts. Redact candidate PII from logs. |
@@ -186,12 +188,12 @@ If asked about AI: “The model is used for drafts, not for eligibility or rejec
 
 ## 11. Keep these limitations visible in your own explanation
 
-- No external ATS integration, agent platform, assignments, webhook receiver, polling sync, or alerting is implemented.
+- No external ATS integration, agent platform, assignments, webhook receiver, external polling sync, or alerting is implemented. Doctor application status polling is in-app only.
 - User/workspace storage is not ready for multiple real customer organizations. Do not upload real candidate data to this local demo.
 - License states are user-entered strings; they are not verified against a licensing authority.
 - Current scoring uses exact specialty checks, simple location matching, and shallow resume keyword detection. It is not validated as predictive or fair.
 - The LLM sees resume text when configured. Before real use, review vendor data terms, minimize data, and build a privacy/security plan.
-- Google Calendar credentials are shared local environment configuration. Without them, `meet.google.com/new` is only a quick-join URL, not an event-specific scheduled meeting.
+- Google Calendar credentials are shared local environment configuration. Configured calendar events invite the applicant; otherwise, the dashboard can show a saved but unscheduled recruiter screen and does not expose a false event-specific Meet room. There is no separate email or SMS notification service.
 - There is no automated test suite evident in this repo. A mature next step is API/unit tests for auth ownership boundaries, score reasons/gates, upload validation, and integration failure cases.
 - The web page is a large client component and API routes live in one file. Refactor when it improves iteration, ownership, or testing—not just to add layers.
 
