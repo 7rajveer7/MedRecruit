@@ -4,9 +4,9 @@ import { FormEvent, useCallback, useEffect, useState } from "react";
 import "./doctor.css";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000";
-type Doctor = { id: number; name: string; email: string; specialty: string; location: string; licenseStates: string[]; availability: string; experience_years: number; resume_filename?: string | null; hasResume: boolean };
+type Doctor = { id: number; name: string; email: string; specialty: string; education: string; location: string; licenseStates: string[]; availability: string; experience_years: number; resume_filename?: string | null; hasResume: boolean };
 type Job = { id: number; title: string; specialty: string; location: string; description: string; requiredLicenses: string[]; companyName: string; status: string };
-type Meeting = { id: number; title: string; startsAt: string; meetUrl: string; calendarEventUrl: string | null; scheduled: boolean; meetReady: boolean };
+type Meeting = { id: number; title: string; startsAt: string; meetUrl: string; calendarEventUrl: string | null; provider: string; scheduled: boolean; meetReady: boolean };
 type Application = { id: number; status: string; appliedAt: string; updatedAt: string; job: Job; meetings: Meeting[] };
 type Tab = "roles" | "applications" | "profile";
 
@@ -24,6 +24,7 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
 function emptyProfile(doctor?: Doctor | null) {
   return {
     specialty: doctor?.specialty ?? "",
+    education: doctor?.education ?? "",
     location: doctor?.location ?? "",
     licenseStates: doctor?.licenseStates.join(", ") ?? "",
     availability: doctor?.availability ?? "",
@@ -84,21 +85,21 @@ export default function DoctorPortal() {
       setProfile(emptyProfile(result.doctor));
       await loadApplications();
       setNotice(authMode === "signup" ? "Account created. Finish your profile to apply." : `Welcome back, Dr. ${result.doctor.name}.`);
-      if (!result.doctor.hasResume || !result.doctor.specialty) setTab("profile");
+      if (!result.doctor.hasResume || !result.doctor.specialty || !result.doctor.education) setTab("profile");
       else if (targetJob) await applyToRole(targetJob, true);
       form.reset();
     } catch (cause) { setError((cause as Error).message); }
     finally { setBusy(false); }
   }
 
-  async function applyToRole(jobId: number, profileReady = Boolean(doctor?.hasResume && doctor?.specialty)) {
+  async function applyToRole(jobId: number, profileReady = Boolean(doctor?.hasResume && doctor?.specialty && doctor?.education)) {
     if (!doctor) {
       setTargetJob(jobId); setAuthMode("signup"); setError("Create a doctor account or sign in to apply.");
       document.getElementById("doctor-auth")?.scrollIntoView({ behavior: "smooth" });
       return;
     }
     if (!profileReady) {
-      setTargetJob(jobId); setTab("profile"); setError("Complete your profile and upload a resume before applying.");
+      setTargetJob(jobId); setTab("profile"); setError("Add your medical degree and specialty training, and upload a resume before applying.");
       return;
     }
     setBusy(true); setError(""); setNotice("");
@@ -127,7 +128,7 @@ export default function DoctorPortal() {
       }
       setDoctor(savedDoctor); setProfile(emptyProfile(savedDoctor));
       setNotice("Profile saved. Your resume is ready to use for applications.");
-      if (targetJob && savedDoctor.hasResume && savedDoctor.specialty) await applyToRole(targetJob, true);
+      if (targetJob && savedDoctor.hasResume && savedDoctor.specialty && savedDoctor.education) await applyToRole(targetJob, true);
       else form.reset();
     } catch (cause) { setError((cause as Error).message); }
     finally { setBusy(false); }
@@ -201,15 +202,16 @@ export default function DoctorPortal() {
           {applications.length ? <div className="doctor-application-list">{applications.map((application) => <article className="doctor-application-card" key={application.id}>
             <div className="doctor-application-top"><div><p className="doctor-job-meta">{application.job.companyName} · {application.job.location}</p><h3>{application.job.title}</h3><p className="doctor-specialty">{application.job.specialty}</p></div><span className={`doctor-status status-${statusClass(application.status)}`}>{application.status}</span></div>
             <div className="doctor-application-foot"><span>Applied {new Date(application.appliedAt).toLocaleDateString()}</span><span>Updated {new Date(application.updatedAt).toLocaleDateString()}</span><span>{application.job.status === "Closed" ? "Role closed" : "Role open"}</span></div>
-            {application.meetings.map((meeting) => <div className="doctor-meeting-card" key={meeting.id}><div><strong>{meeting.scheduled ? "Interview invitation" : "Recruiter screen update"}</strong><p>{meeting.title} · {new Date(meeting.startsAt).toLocaleString()}</p>{meeting.scheduled && !meeting.meetReady && <p>The calendar event is ready; the Meet link may still be generating.</p>}{!meeting.scheduled && <p>The recruiter saved a screen request. The calendar invite is not scheduled yet.</p>}</div>{meeting.meetReady && <a className="button primary" href={meeting.meetUrl} target="_blank" rel="noreferrer">Join Google Meet ↗</a>}{meeting.calendarEventUrl && <a className="button outline" href={meeting.calendarEventUrl} target="_blank" rel="noreferrer">Open calendar ↗</a>}</div>)}
+            {application.meetings.map((meeting) => <div className="doctor-meeting-card" key={meeting.id}><div><strong>Interview invitation</strong><p>{meeting.title} · {new Date(meeting.startsAt).toLocaleString()}</p>{meeting.provider === "jitsi" && <p>Video room provided by Jitsi. No calendar account is needed.</p>}{meeting.provider === "google_calendar" && !meeting.meetReady && <p>The calendar event is ready; the Meet link may still be generating.</p>}</div>{meeting.meetReady && <a className="button primary" href={meeting.meetUrl} target="_blank" rel="noreferrer">Join video interview ↗</a>}{meeting.calendarEventUrl && <a className="button outline" href={meeting.calendarEventUrl} target="_blank" rel="noreferrer">Open calendar ↗</a>}</div>)}
           </article>)}</div> : <div className="doctor-empty"><strong>No applications yet</strong><p>Browse open roles and apply to see your progress here.</p><button className="button outline" onClick={() => setTab("roles")}>Find open roles</button></div>}
         </section>}
 
         {tab === "profile" && <section className="panel doctor-profile-panel">
-          <div className="doctor-section-heading"><div><h2>My profile</h2><p>Keep these details and your resume current before applying.</p></div><span className={doctor.hasResume && doctor.specialty ? "profile-ready" : "profile-incomplete"}>{doctor.hasResume && doctor.specialty ? "Ready to apply" : "Complete profile"}</span></div>
+          <div className="doctor-section-heading"><div><h2>My profile</h2><p>Keep these details and your resume current before applying.</p></div><span className={doctor.hasResume && doctor.specialty && doctor.education ? "profile-ready" : "profile-incomplete"}>{doctor.hasResume && doctor.specialty && doctor.education ? "Ready to apply" : "Complete profile"}</span></div>
           <form className="doctor-form profile-form" onSubmit={saveProfile}>
             <div className="profile-account"><strong>{doctor.name}</strong><span>{doctor.email}</span></div>
             <div className="field-row"><label>Medical specialty<input value={profile.specialty} onChange={(event) => setProfile({ ...profile, specialty: event.target.value })} required placeholder="Cardiology" /></label><label>Current location<input value={profile.location} onChange={(event) => setProfile({ ...profile, location: event.target.value })} placeholder="Raleigh, NC" /></label></div>
+            <label>Medical degree and specialty training<input value={profile.education} onChange={(event) => setProfile({ ...profile, education: event.target.value })} required placeholder="MD, Internal Medicine residency, Cardiology fellowship" /><span className="optional">This is used to check role-related education in the shortlist.</span></label>
             <label>License states <span className="optional">Comma separated</span><input value={profile.licenseStates} onChange={(event) => setProfile({ ...profile, licenseStates: event.target.value })} placeholder="NC, VA" /></label>
             <div className="field-row"><label>Availability<input value={profile.availability} onChange={(event) => setProfile({ ...profile, availability: event.target.value })} placeholder="Weekdays, starts June" /></label><label>Years of experience<input type="number" min="0" max="60" value={profile.experienceYears} onChange={(event) => setProfile({ ...profile, experienceYears: Number(event.target.value) })} /></label></div>
             <label>Resume <span className="optional">PDF, DOCX, or TXT · 12 MB max</span><input className="file-input" type="file" name="resume" accept=".pdf,.docx,.txt" required={!doctor.hasResume} /></label>

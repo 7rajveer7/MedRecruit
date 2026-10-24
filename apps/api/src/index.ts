@@ -55,6 +55,7 @@ db.exec(`
     email TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
     specialty TEXT NOT NULL DEFAULT '',
+    education TEXT NOT NULL DEFAULT '',
     location TEXT NOT NULL DEFAULT '',
     license_states TEXT NOT NULL DEFAULT '[]',
     availability TEXT NOT NULL DEFAULT '',
@@ -82,6 +83,7 @@ db.exec(`
     name TEXT NOT NULL,
     email TEXT,
     specialty TEXT NOT NULL DEFAULT '',
+    education TEXT NOT NULL DEFAULT '',
     location TEXT NOT NULL DEFAULT '',
     license_states TEXT NOT NULL DEFAULT '[]',
     availability TEXT NOT NULL DEFAULT '',
@@ -115,6 +117,7 @@ db.exec(`
     meet_url TEXT NOT NULL,
     calendar_event_id TEXT,
     calendar_event_url TEXT,
+    provider TEXT NOT NULL DEFAULT 'unknown',
     created_at TEXT NOT NULL
   );
   CREATE TABLE IF NOT EXISTS applications (
@@ -132,6 +135,11 @@ db.exec(`
 // Older local databases predate the doctor portal. Keep them usable without deleting recruiter data.
 const candidateColumns = rows<{ name: string }>("PRAGMA table_info(candidates)").map((column) => column.name);
 if (!candidateColumns.includes("doctor_id")) db.run("ALTER TABLE candidates ADD COLUMN doctor_id INTEGER");
+if (!candidateColumns.includes("education")) db.run("ALTER TABLE candidates ADD COLUMN education TEXT NOT NULL DEFAULT ''");
+const doctorColumns = rows<{ name: string }>("PRAGMA table_info(doctor_accounts)").map((column) => column.name);
+if (!doctorColumns.includes("education")) db.run("ALTER TABLE doctor_accounts ADD COLUMN education TEXT NOT NULL DEFAULT ''");
+const meetingColumns = rows<{ name: string }>("PRAGMA table_info(meetings)").map((column) => column.name);
+if (!meetingColumns.includes("provider")) db.run("ALTER TABLE meetings ADD COLUMN provider TEXT NOT NULL DEFAULT 'unknown'");
 
 function persist() {
   writeFileSync(databasePath, Buffer.from(db.export()));
@@ -280,9 +288,10 @@ app.get("/api/doctor/profile", { preHandler: requireDoctor }, async (request, re
   return { doctor: cleanDoctor(doctor) };
 });
 
-app.patch<{ Body: { specialty?: string; location?: string; licenseStates?: unknown; availability?: string; experienceYears?: number } }>("/api/doctor/profile", { preHandler: requireDoctor }, async (request, reply) => {
+app.patch<{ Body: { specialty?: string; education?: string; location?: string; licenseStates?: unknown; availability?: string; experienceYears?: number } }>("/api/doctor/profile", { preHandler: requireDoctor }, async (request, reply) => {
   const experience = Math.max(0, Math.min(60, Number(request.body?.experienceYears) || 0));
-  run("UPDATE doctor_accounts SET specialty = ?, location = ?, license_states = ?, availability = ?, experience_years = ?, updated_at = ? WHERE id = ?", [normalize(request.body?.specialty), normalize(request.body?.location), JSON.stringify(jsonArray(request.body?.licenseStates)), normalize(request.body?.availability), experience, new Date().toISOString(), doctorId(request)]);
+  run("UPDATE doctor_accounts SET specialty = ?, education = ?, location = ?, license_states = ?, availability = ?, experience_years = ?, updated_at = ? WHERE id = ?", [normalize(request.body?.specialty), normalize(request.body?.education), normalize(request.body?.location), JSON.stringify(jsonArray(request.body?.licenseStates)), normalize(request.body?.availability), experience, new Date().toISOString(), doctorId(request)]);
+  run("UPDATE candidates SET specialty = ?, education = ? WHERE doctor_id = ?", [normalize(request.body?.specialty), normalize(request.body?.education), doctorId(request)]);
   persist();
   const doctor = one<Record<string, unknown>>("SELECT * FROM doctor_accounts WHERE id = ?", [doctorId(request)]);
   if (!doctor) return reply.code(404).send({ error: "Doctor account not found." });
@@ -315,12 +324,12 @@ app.post("/api/doctor/profile/resume", { preHandler: requireDoctor }, async (req
 app.post<{ Params: { id: string } }>("/api/public/jobs/:id/applications", { preHandler: requireDoctor }, async (request, reply) => {
   const doctor = one<Record<string, unknown>>("SELECT * FROM doctor_accounts WHERE id = ?", [doctorId(request)]);
   if (!doctor) return reply.code(404).send({ error: "Doctor account not found." });
-  if (!doctor.resume_storage_key || !normalize(doctor.specialty)) return reply.code(400).send({ error: "Complete your profile and upload a resume before applying." });
+  if (!doctor.resume_storage_key || !normalize(doctor.specialty) || !normalize(doctor.education)) return reply.code(400).send({ error: "Complete your specialty and education details and upload a resume before applying." });
   const job = one<Record<string, unknown>>("SELECT * FROM jobs WHERE id = ? AND status = 'Open'", [Number(request.params.id)]);
   if (!job) return reply.code(404).send({ error: "This role is no longer open." });
   if (one("SELECT id FROM applications WHERE doctor_id = ? AND job_id = ?", [doctorId(request), Number(job.id)])) return reply.code(409).send({ error: "You have already applied to this role." });
   const now = new Date().toISOString();
-  run("INSERT INTO candidates (user_id, name, email, specialty, location, license_states, availability, experience_years, source, resume_filename, resume_storage_key, resume_text, doctor_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [Number(job.user_id), String(doctor.name), String(doctor.email), String(doctor.specialty), String(doctor.location), String(doctor.license_states), String(doctor.availability), Number(doctor.experience_years), "Doctor portal application", String(doctor.resume_filename), String(doctor.resume_storage_key), String(doctor.resume_text ?? ""), doctorId(request), now]);
+  run("INSERT INTO candidates (user_id, name, email, specialty, education, location, license_states, availability, experience_years, source, resume_filename, resume_storage_key, resume_text, doctor_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [Number(job.user_id), String(doctor.name), String(doctor.email), String(doctor.specialty), String(doctor.education ?? ""), String(doctor.location), String(doctor.license_states), String(doctor.availability), Number(doctor.experience_years), "Doctor portal application", String(doctor.resume_filename), String(doctor.resume_storage_key), String(doctor.resume_text ?? ""), doctorId(request), now]);
   const candidateId = newId();
   run("INSERT INTO applications (doctor_id, job_id, candidate_id, status, applied_at, updated_at) VALUES (?, ?, ?, 'Applied', ?, ?)", [doctorId(request), Number(job.id), candidateId, now, now]);
   const applicationId = newId();
@@ -336,7 +345,7 @@ app.get("/api/doctor/applications", { preHandler: requireDoctor }, async (reques
     appliedAt: String(application.applied_at),
     updatedAt: String(application.updated_at),
     job: { id: Number(application.job_id), title: String(application.title), specialty: String(application.specialty), location: String(application.location), companyName: String(application.company_name || "Healthcare team"), status: String(application.job_status) },
-    meetings: rows<Record<string, unknown>>("SELECT id, title, starts_at, meet_url, calendar_event_url, calendar_event_id FROM meetings WHERE candidate_id = ? ORDER BY starts_at DESC", [Number(application.candidate_id)]).map((meeting) => ({ id: Number(meeting.id), title: String(meeting.title), startsAt: String(meeting.starts_at), meetUrl: String(meeting.meet_url), calendarEventUrl: meeting.calendar_event_url ? String(meeting.calendar_event_url) : null, scheduled: Boolean(meeting.calendar_event_id), meetReady: !String(meeting.meet_url).endsWith("/new") }))
+    meetings: rows<Record<string, unknown>>("SELECT id, title, starts_at, meet_url, calendar_event_url, calendar_event_id, provider FROM meetings WHERE candidate_id = ? ORDER BY starts_at DESC", [Number(application.candidate_id)]).map((meeting) => ({ id: Number(meeting.id), title: String(meeting.title), startsAt: String(meeting.starts_at), meetUrl: String(meeting.meet_url), calendarEventUrl: meeting.calendar_event_url ? String(meeting.calendar_event_url) : null, provider: String(meeting.provider), scheduled: !String(meeting.meet_url).endsWith("/new"), meetReady: !String(meeting.meet_url).endsWith("/new") }))
   }));
 });
 
@@ -423,11 +432,11 @@ app.get("/api/candidates", { preHandler: requireAuth }, async (request) => {
   return candidates.map(safeCandidate);
 });
 
-app.post<{ Body: { name?: string; email?: string; specialty?: string; location?: string; licenseStates?: unknown; availability?: string; experienceYears?: number; source?: string } }>("/api/candidates", { preHandler: requireAuth }, async (request, reply) => {
+app.post<{ Body: { name?: string; email?: string; specialty?: string; education?: string; location?: string; licenseStates?: unknown; availability?: string; experienceYears?: number; source?: string } }>("/api/candidates", { preHandler: requireAuth }, async (request, reply) => {
   const name = normalize(request.body?.name);
   if (name.length < 2) return reply.code(400).send({ error: "Candidate name is required." });
   const experience = Math.max(0, Math.min(60, Number(request.body?.experienceYears) || 0));
-  run("INSERT INTO candidates (user_id, name, email, specialty, location, license_states, availability, experience_years, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [userId(request), name, normalize(request.body?.email).toLowerCase(), normalize(request.body?.specialty), normalize(request.body?.location), JSON.stringify(jsonArray(request.body?.licenseStates)), normalize(request.body?.availability), experience, normalize(request.body?.source) || "Manual entry", new Date().toISOString()]);
+  run("INSERT INTO candidates (user_id, name, email, specialty, education, location, license_states, availability, experience_years, source, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [userId(request), name, normalize(request.body?.email).toLowerCase(), normalize(request.body?.specialty), normalize(request.body?.education), normalize(request.body?.location), JSON.stringify(jsonArray(request.body?.licenseStates)), normalize(request.body?.availability), experience, normalize(request.body?.source) || "Manual entry", new Date().toISOString()]);
   const id = newId();
   persist();
   return reply.code(201).send(safeCandidate(one<Record<string, unknown>>("SELECT * FROM candidates WHERE id = ?", [id])!));
@@ -447,6 +456,16 @@ app.patch<{ Params: { id: string }; Body: { stage?: string } }>("/api/candidates
     : stage === "Expired" || stage === "Archived" ? "Expired"
     : "Under consideration";
   run("UPDATE applications SET status = ?, updated_at = ? WHERE candidate_id = ?", [applicationStatus, new Date().toISOString(), Number(candidate.id)]);
+  persist();
+  return { candidate: safeCandidate(candidateFor(userId(request), Number(candidate.id))!) };
+});
+
+app.patch<{ Params: { id: string }; Body: { education?: string } }>("/api/candidates/:id/education", { preHandler: requireAuth }, async (request, reply) => {
+  const candidate = candidateFor(userId(request), Number(request.params.id));
+  if (!candidate) return reply.code(404).send({ error: "Candidate not found." });
+  const education = normalize(request.body?.education);
+  if (!education) return reply.code(400).send({ error: "Enter the candidate’s medical degree and specialty training." });
+  run("UPDATE candidates SET education = ? WHERE id = ? AND user_id = ?", [education, Number(candidate.id), userId(request)]);
   persist();
   return { candidate: safeCandidate(candidateFor(userId(request), Number(candidate.id))!) };
 });
@@ -497,12 +516,21 @@ app.post<{ Params: { id: string } }>("/api/jobs/:id/shortlist", { preHandler: re
     const reasons: string[] = [];
     const gaps: string[] = [];
     const specialtyFit = String(candidate.specialty).toLowerCase() === String(job.specialty).toLowerCase();
+    const education = String(candidate.education ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    const specialtyTerms = String(job.specialty).toLowerCase().replace(/\b(medicine|medical|physician|doctor|and)\b/g, " ").split(/[^a-z0-9]+/).filter((term) => term.length > 2);
+    const hasMedicalDegree = /\b(md|do|mbbs|mbchb)\b/.test(education) || ["doctor of medicine", "doctor of osteopathic medicine", "medical degree"].some((term) => education.includes(term));
+    const educationSpecialtyFit = specialtyTerms.length === 0 || specialtyTerms.some((term) => education.includes(term));
+    const educationFit = hasMedicalDegree && educationSpecialtyFit;
+    const roleFieldFit = specialtyFit && educationFit;
     const licenseMatches = required.filter((license) => licenses.some((candidateLicense) => candidateLicense.toLowerCase() === license.toLowerCase()));
     const locationFit = String(candidate.location).toLowerCase().includes(String(job.location).split(",")[0].toLowerCase());
     const resume = String(candidate.resume_text).toLowerCase();
     const keywordFit = resume.length > 0 && [String(job.specialty).toLowerCase(), ...required.map((item) => item.toLowerCase())].some((term) => term.length > 2 && resume.includes(term));
     let score = 0;
     if (specialtyFit) { score += 35; reasons.push(`Specialty matches ${job.specialty} (+35).`); } else gaps.push(`Specialty differs from ${job.specialty}.`);
+    if (educationFit) reasons.push(`Medical degree and education evidence match ${job.specialty}.`);
+    else if (!hasMedicalDegree) gaps.push("Relevant medical education is missing or unverified; record an MD, DO, MBBS, or equivalent degree.");
+    else gaps.push(`Education does not show training in ${job.specialty}; verify degree and specialty training.`);
     if (required.length === 0) { score += 25; reasons.push("No role-specific license requirement was configured (+25 neutral). "); }
     else if (licenseMatches.length === required.length) { score += 25; reasons.push(`Required license evidence matches (${licenseMatches.length}/${required.length}; +25).`); }
     else if (licenseMatches.length > 0) { score += Math.round(25 * licenseMatches.length / required.length); gaps.push(`License evidence covers ${licenseMatches.length}/${required.length} required items; verify the rest.`); }
@@ -511,15 +539,21 @@ app.post<{ Params: { id: string } }>("/api/jobs/:id/shortlist", { preHandler: re
     const hasAvailability = String(candidate.availability).trim().length > 0;
     if (hasAvailability) { score += 10; reasons.push("Availability is recorded (+10). "); } else gaps.push("Availability has not been recorded.");
     if (keywordFit) { score += 5; reasons.push("Resume contains role-related evidence (+5); review the source text."); } else gaps.push("No related terms found in the uploaded resume text.");
-    if (Number(candidate.experience_years) > 0) { score += Math.min(10, Number(candidate.experience_years)); reasons.push(`Experience recorded: ${candidate.experience_years} years (up to +10).`); }
+    if (roleFieldFit && Number(candidate.experience_years) > 0) { score += Math.min(10, Number(candidate.experience_years)); reasons.push(`Experience recorded: ${candidate.experience_years} years (up to +10), counted because specialty and relevant education match.`); }
+    else if (!roleFieldFit) gaps.push("Experience earns no shortlist points until the candidate specialty and relevant medical education match the role.");
     else gaps.push("Relevant experience years have not been recorded.");
+    if (!roleFieldFit) {
+      score = 0;
+      reasons.length = 0;
+      reasons.push("0 shortlist points: candidate specialty and relevant medical degree/field education must match the role before scoring.");
+    }
     score = Math.min(100, score);
-    const eligible = specialtyFit && (required.length === 0 || licenseMatches.length === required.length);
+    const eligible = roleFieldFit && (required.length === 0 || licenseMatches.length === required.length);
     run("INSERT INTO shortlist_results (user_id, job_id, candidate_id, fit_score, eligible, reasons, gaps, generated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(job_id, candidate_id) DO UPDATE SET fit_score=excluded.fit_score, eligible=excluded.eligible, reasons=excluded.reasons, gaps=excluded.gaps, generated_at=excluded.generated_at", [user, Number(job.id), Number(candidate.id), score, eligible ? 1 : 0, JSON.stringify(reasons), JSON.stringify(gaps), new Date().toISOString()]);
     return { candidate: safeCandidate(candidate), fitScore: score, eligible, reasons, gaps };
   }).sort((a, b) => Number(b.eligible) - Number(a.eligible) || b.fitScore - a.fitScore);
   persist();
-  return { job: { id: job.id, title: job.title }, scoring: "Specialty 35 · licenses 25 · location 15 · availability 10 · resume evidence 5 · experience up to 10; eligibility is gated by specialty and any required licenses.", results };
+  return { job: { id: job.id, title: job.title }, scoring: "Specialty 35 · licenses 25 · location 15 · availability 10 · resume evidence 5 · relevant experience up to 10. Eligibility requires matching specialty, relevant medical degree/field education, and any required licenses. Experience points are withheld if education is missing or unrelated.", results };
 });
 
 async function aiDraft(prompt: string, fallback: string) {
@@ -590,7 +624,10 @@ app.post<{ Params: { id: string }; Body: { startsAt?: string; durationMinutes?: 
   const duration = Math.max(15, Math.min(120, Number(request.body?.durationMinutes) || 30));
   const endsAt = new Date(startsAt.getTime() + duration * 60_000);
   const title = normalize(request.body?.title) || `Recruiter screen — ${candidate.name}`;
-  let meetUrl = "https://meet.google.com/new";
+  // Calendar is optional. Without it, create an unguessable Jitsi room so both sides
+  // still have a concrete video link to join from their dashboards.
+  let meetUrl = `https://meet.jit.si/medrecruit-${randomUUID()}`;
+  let provider = "jitsi";
   let calendarEventId: string | null = null;
   let calendarEventUrl: string | null = null;
   let scheduled = false;
@@ -608,6 +645,7 @@ app.post<{ Params: { id: string }; Body: { startsAt?: string; durationMinutes?: 
       calendarEventId = event.id ?? null;
       calendarEventUrl = event.htmlLink ?? null;
       scheduled = true;
+      provider = "google_calendar";
       meetUrl = event.conferenceData?.entryPoints?.find((item) => item.entryPointType === "video")?.uri ?? meetUrl;
       if (meetUrl.endsWith("/new") && event.id) {
         await new Promise((resolveWait) => setTimeout(resolveWait, 900));
@@ -623,15 +661,15 @@ app.post<{ Params: { id: string }; Body: { startsAt?: string; durationMinutes?: 
     app.log.warn({ err: error }, "Calendar event could not be scheduled");
     return reply.code(502).send({ error: "Google Calendar could not create the meeting. Check OAuth setup and Calendar API access." });
   }
-  run("INSERT INTO meetings (user_id, candidate_id, title, starts_at, meet_url, calendar_event_id, calendar_event_url, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", [user, Number(candidate.id), title, startsAt.toISOString(), meetUrl, calendarEventId, calendarEventUrl, new Date().toISOString()]);
+  run("INSERT INTO meetings (user_id, candidate_id, title, starts_at, meet_url, calendar_event_id, calendar_event_url, provider, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", [user, Number(candidate.id), title, startsAt.toISOString(), meetUrl, calendarEventId, calendarEventUrl, provider, new Date().toISOString()]);
   const meetingId = newId();
   run("UPDATE applications SET status = 'Interview', updated_at = ? WHERE candidate_id = ?", [new Date().toISOString(), Number(candidate.id)]);
   persist();
   const meetReady = !meetUrl.endsWith("/new");
   const note = scheduled
     ? meetReady ? undefined : "Calendar event scheduled; Google is still generating its Meet link. Open the event in Calendar to check again."
-    : "Add Google OAuth values to .env to create a scheduled Calendar event. This is a quick-join link only.";
-  return reply.code(201).send({ meeting: { id: meetingId, title, startsAt: startsAt.toISOString(), endsAt: endsAt.toISOString(), meetUrl, meetReady, scheduled, calendarEventId, calendarEventUrl, note } });
+    : "A Jitsi video room was created. The doctor can join from their application dashboard; no Calendar setup is needed.";
+  return reply.code(201).send({ meeting: { id: meetingId, title, startsAt: startsAt.toISOString(), endsAt: endsAt.toISOString(), meetUrl, meetReady, scheduled: true, provider, calendarEventId, calendarEventUrl, note } });
 });
 
 app.get("/api/meetings", { preHandler: requireAuth }, async (request) => {
